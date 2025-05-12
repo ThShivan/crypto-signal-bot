@@ -692,3 +692,9 @@ def main():
         error_msg = f"❌ Critical Error in signal bot main process: {type(e).__name__} - {str(e)}"
         print(error_msg)
         send_telegram(f"*CRITICAL ERROR*: {error_msg}")
+
+if __name__ == "__main__":
+    if not TG_TOKEN or not TG_CHAT:
+        print("⚠️ TG_TOKEN / TG_CHAT environment variables missing. Telegram notifications will be disabled.")
+    
+    main()
