@@ -132,7 +132,33 @@ def fetch_mtf_data(exchange, symbol):
 
     return {'daily': daily, '4h': h4, '1h': h1}
 
-
+# 레버리지 계산 함수 추가
+def calculate_leverage(current_price, stop_loss, risk_percentage=1.0):
+    """
+    적절한 레버리지 계산 - 계좌의 1%만 손실하는 레버리지 계산
+    
+    Args:
+        current_price: 현재 가격
+        stop_loss: 손절가
+        risk_percentage: 계좌 자산의 손실 허용 비율 (기본값 1%)
+        
+    Returns:
+        권장 레버리지
+    """
+    # 가격 변동 비율 계산 (스탑로스까지의 거리)
+    price_change_percent = abs(current_price - stop_loss) / current_price * 100
+    
+    if price_change_percent == 0:
+        return 1  # 안전한 기본값
+    
+    # 레버리지 = 최대 손실 허용 비율 / 가격 변동 비율
+    leverage = risk_percentage / price_change_percent
+    
+    # 일반적인 제약: 레버리지는 1x보다 크고, 20x를 넘기지 않도록
+    leverage = max(1, min(round(leverage, 1), 20))
+    
+    return leverage
+    
 # ─────────── 기술적 분석 함수 ───────────
 
 def check_trend(df, side):
@@ -534,6 +560,9 @@ def scan_okx():
                     pnl2 = ((take_profit2 - current_price) / current_price) * 100
                     pnl3 = ((take_profit3 - current_price) / current_price) * 100
                     
+                    # 레버리지 계산 추가
+                    recommended_leverage = calculate_leverage(current_price, stop_loss)
+                    
                     longs.append({
                         'symbol': base_symbol, 
                         'strength': long_analysis['strength'], 
@@ -548,7 +577,8 @@ def scan_okx():
                         'take_profit3': take_profit3,
                         'pnl1': pnl1,
                         'pnl2': pnl2,
-                        'pnl3': pnl3
+                        'pnl3': pnl3,
+                        'leverage': recommended_leverage
                     })
                     
                     log_signal('okx', base_symbol, 'long', {'strength': long_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
@@ -583,6 +613,9 @@ def scan_okx():
                     pnl1 = ((current_price - take_profit1) / current_price) * 100
                     pnl2 = ((current_price - take_profit2) / current_price) * 100
                     pnl3 = ((current_price - take_profit3) / current_price) * 100
+
+                    # 레버리지 계산 추가
+                    recommended_leverage = calculate_leverage(current_price, stop_loss)
                     
                     shorts.append({
                         'symbol': base_symbol, 
@@ -598,7 +631,8 @@ def scan_okx():
                         'take_profit3': take_profit3,
                         'pnl1': pnl1,
                         'pnl2': pnl2,
-                        'pnl3': pnl3
+                        'pnl3': pnl3,
+                        'leverage': recommended_leverage
                     })
                     
                     log_signal('okx', base_symbol, 'short', {'strength': short_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
@@ -660,7 +694,7 @@ def main():
         if longs:
             msg_body += "🎯 *Long (OKX USDT-Perp)*\n"
             for i, item in enumerate(longs, 1):
-                msg_body += f"{i}. [{item['symbol']}] (LONG)\n"
+                msg_body += f"{i}. [{item['symbol']}] (LONG) - {item['leverage']}X 레버리지\n"
                 msg_body += f"(1) 진입가(Entry): {item['entry_low']:.2f} - {item['entry_high']:.2f}\n"
                 msg_body += f"(2) 손절가(Stop Loss): {item['stop_loss']:.2f}\n"
                 msg_body += f"(3) 1차 목표가(TP1): {item['take_profit1']:.2f} (채널 중앙) ({item['pnl1']:.1f}%)\n"
@@ -673,7 +707,7 @@ def main():
         if shorts:
             msg_body += "📉 *Short (OKX USDT-Perp)*\n"
             for i, item in enumerate(shorts, 1):
-                msg_body += f"{i}. [{item['symbol']}] (SHORT)\n"
+                msg_body += f"{i}. [{item['symbol']}] (SHORT) - {item['leverage']}X 레버리지\n"
                 msg_body += f"(1) 진입가(Entry): {item['entry_low']:.2f} - {item['entry_high']:.2f}\n"
                 msg_body += f"(2) 손절가(Stop Loss): {item['stop_loss']:.2f}\n"
                 msg_body += f"(3) 1차 목표가(TP1): {item['take_profit1']:.2f} (채널 중앙) ({item['pnl1']:.1f}%)\n"
