@@ -1,4 +1,4 @@
-name: Binance 4-Step Daily
+name: CCXT 4-Step Daily
 on:
   schedule:
     - cron: '0 */4 * * *'      # 매 4시간마다	
