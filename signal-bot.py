@@ -559,7 +559,7 @@ def main():
 
     try:
         okx_long_results, okx_short_results = scan_okx()
-        upbit_spot_results = scan_upbit()
+         """upbit_spot_results = scan_upbit()"""
         
         now_korea = dt.datetime.now(kst) 
         
