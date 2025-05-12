@@ -5,7 +5,7 @@
 #   • 다중 시간대 분석(MTF) 추가 (상위 → 중간 → 하위)
 #   • 매물대 근처 시그널 우선순위 반영
 #   • OKX = Long·Short / Upbit = Spot(Long)
-#   • 결과를 Telegram으로 전송 (09:00 KST, GitHub Actions)
+#   • 결과를 Telegram으로 전송 (GitHub Actions 등에서 스케줄링)
 # -----------------------------------------------
 # requirements.txt:
 # pandas
@@ -31,44 +31,44 @@ LOGS_DIR = "logs"  # 로그 저장 디렉토리
 
 # ─────────── 매개변수 ───────────
 # 다중 시간대 분석을 위한 설정
-INTERVAL_DAILY = '1d'       # 일봉 (상위 추세)
-INTERVAL_4H = '4h'          # 4시간봉 (중기 추세)
-INTERVAL_1H = '1h'          # 1시간봉 (단기 타이밍)
-INTERVAL_UPBIT_DAILY = '1440m'
-INTERVAL_UPBIT_4H = '240m'
-INTERVAL_UPBIT_1H = '60m'
+INTERVAL_DAILY = '1d'        # 일봉 (상위 추세)
+INTERVAL_4H = '4h'           # 4시간봉 (중기 추세)
+INTERVAL_1H = '1h'           # 1시간봉 (단기 타이밍)
+INTERVAL_UPBIT_DAILY = 'day' # 업비트 일봉 (ccxt 표준 사용)
+INTERVAL_UPBIT_4H = '240m'   # 업비트 4시간봉
+INTERVAL_UPBIT_1H = '60m'    # 업비트 1시간봉
 
 # 각 시간대별 가져올 캔들 수
-CANDLES_DAILY = 90          # 약 3개월
-CANDLES_4H = 200            # 약 33일
-CANDLES_1H = 180            # 약 7.5일
+CANDLES_DAILY = 90           # 약 3개월
+CANDLES_4H = 200             # 약 33일 (LEN_CHAN + 여유분)
+CANDLES_1H = 180             # 약 7.5일
 
 # 채널 및 필터 설정
-LEN_CHAN = 120              # 채널 길이
-RSI_PERIOD = 14             # RSI 주기
-TREND_CHECK_DAYS = 5        # 추세 확인 캔들 수
-DIVERGENCE_LOOKBACK = 5     # 다이버전스 확인 기간
-VOLUME_PROFILE_PERIODS = 20 # 매물대 분석 기간
+LEN_CHAN = 120               # 채널 EMA 길이 (4시간봉 기준 약 20일)
+RSI_PERIOD = 14              # RSI 주기
+TREND_CHECK_CANDLES = 3      # 추세 확인 시 사용할 최근 캔들 수 (예: 3개 캔들이 연속 HH/HL)
+DIVERGENCE_LOOKBACK = 10     # 다이버전스 확인 기간 (캔들 수)
+VOLUME_PROFILE_PERIODS = 30  # 매물대 분석 기간 (캔들 수)
 
-# 조건별 가중치 설정 (0~1)
-WEIGHT_TREND = 0.3          # 추세 가중치
-WEIGHT_CHANNEL = 0.25       # 채널 가중치
-WEIGHT_RSI = 0.25           # RSI 가중치
-WEIGHT_VOLUME_PROFILE = 0.2 # 매물대 가중치
+# 조건별 가중치 설정 (0~1) - 현재 signal_strength 계산에는 직접 반영되지 않음. 개념적 중요도.
+WEIGHT_TREND = 0.3           # 추세 가중치
+WEIGHT_CHANNEL = 0.25        # 채널 가중치
+WEIGHT_RSI = 0.25            # RSI 가중치
+WEIGHT_VOLUME_PROFILE = 0.2  # 매물대 가중치
 
 # 매매 조건 설정
-RSI_OVERSOLD = 30           # RSI 과매도
-RSI_OVERBOUGHT = 70         # RSI 과매수
-MARGIN = 0.02               # 채널 마진 (2%)
-SMA_DEVIATION = 0.02        # SMA 편차 허용 범위
-MIN_RISK_REWARD = 2         # 최소 손익비 (1:2)
+RSI_OVERSOLD = 30            # RSI 과매도
+RSI_OVERBOUGHT = 70          # RSI 과매수
+MARGIN = 0.02                # 채널 마진 (2%) - 현재 코드에서는 직접 사용되지 않음 (analyze_channel 에서 dev로 동적 계산)
+SMA_DEVIATION = 0.02         # SMA 편차 허용 범위
+MIN_RISK_REWARD = 1.5        # 최소 손익비 (1:1.5) - 상향 조정 고려
 
 # 거래량 필터
-VOL_MIN_USDT = 1_000_000         # OKX 24h 거래대금
-VOL_MIN_KRW = 1_000_000_000      # Upbit 24h 거래대금(원)
+VOL_MIN_USDT = 1_000_000       # OKX 24h 거래대금
+VOL_MIN_KRW = 1_000_000_000    # Upbit 24h 거래대금(원)
 
 # ─────────── 거래소 인스턴스 ───────────
-okx = ccxt.okx({'enableRateLimit': True})
+okx = ccxt.okx({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
 upbit = ccxt.upbit({'enableRateLimit': True})
 
 # ─────────── 유틸리티 함수 ───────────
@@ -81,615 +81,511 @@ def ensure_dir(directory):
 def log_signal(exchange, symbol, side, signal_data):
     """신호 로깅"""
     ensure_dir(LOGS_DIR)
-    timestamp = dt.datetime.utcnow().strftime("%Y-%m-%d")
-    filename = f"{LOGS_DIR}/{exchange}_{timestamp}.csv"
+    timestamp_file = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d") # 파일명 날짜 기준 UTC
+    filename = f"{LOGS_DIR}/{exchange}_{timestamp_file}.csv"
     
-    # 신호 데이터를 DataFrame으로 변환
-    df = pd.DataFrame([{
-        'timestamp': dt.datetime.utcnow().isoformat(),
+    log_entry = {
+        'timestamp': dt.datetime.now(dt.timezone.utc).isoformat(), # 로그 시간 UTC
         'symbol': symbol,
         'side': side,
         **signal_data
-    }])
+    }
+    df = pd.DataFrame([log_entry])
     
-    # 파일이 있으면 추가, 없으면 생성
     if os.path.exists(filename):
-        df.to_csv(filename, mode='a', header=False, index=False)
+        df.to_csv(filename, mode='a', header=False, index=False, encoding='utf-8-sig')
     else:
-        df.to_csv(filename, index=False)
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
 
 # ─────────── OHLCV 데이터 가져오기 ───────────
 
-def fetch_ohlcv_okx(symbol, timeframe, limit):
-    """OKX에서 OHLCV 데이터 가져오기"""
-    ohlcv = okx.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+def fetch_ohlcv_with_retry(exchange_func, symbol, timeframe, limit, max_retries=3, delay=5):
+    """지정된 횟수만큼 재시도하며 OHLCV 데이터 가져오기"""
+    for attempt in range(max_retries):
+        try:
+            ohlcv = exchange_func(symbol, timeframe=timeframe, limit=limit)
+            if len(ohlcv) < limit * 0.8: # 데이터가 충분히 오지 않은 경우 (네트워크 등 이슈)
+                raise ccxt.NetworkError(f"Insufficient data for {symbol} {timeframe}: got {len(ohlcv)}, expected {limit}")
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            # 필수 컬럼 존재 및 NA 값 확인 (최근 데이터에 NA가 있으면 안됨)
+            required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            if not all(col in df.columns for col in required_cols) or df.iloc[-5:][required_cols].isnull().any().any():
+                raise ValueError(f"OHLCV data for {symbol} {timeframe} contains NaNs or missing columns in recent data.")
+            return df
+        except (ccxt.NetworkError, ccxt.ExchangeError, ValueError) as e:
+            print(f"[Fetch Retry {attempt+1}/{max_retries}] Failed to fetch {symbol} {timeframe}: {e}")
+            if attempt + 1 == max_retries:
+                raise  # 마지막 재시도 실패 시 예외 발생
+            time.sleep(delay)
 
-def fetch_ohlcv_upbit(symbol, timeframe, limit):
-    """Upbit에서 OHLCV 데이터 가져오기"""
-    ohlcv = upbit.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-    return df
+def fetch_mtf_data(exchange, symbol, is_okx=True):
+    """거래소에서 다중 시간대 데이터 가져오기"""
+    fetch_func = okx.fetch_ohlcv if is_okx else upbit.fetch_ohlcv
+    tf_daily = INTERVAL_DAILY if is_okx else INTERVAL_UPBIT_DAILY
+    tf_4h = INTERVAL_4H if is_okx else INTERVAL_UPBIT_4H
+    tf_1h = INTERVAL_1H if is_okx else INTERVAL_UPBIT_1H
 
-def fetch_mtf_data_okx(symbol):
-    """OKX에서 다중 시간대 데이터 가져오기"""
-    daily = fetch_ohlcv_okx(symbol, INTERVAL_DAILY, CANDLES_DAILY)
-    h4 = fetch_ohlcv_okx(symbol, INTERVAL_4H, CANDLES_4H)
-    h1 = fetch_ohlcv_okx(symbol, INTERVAL_1H, CANDLES_1H)
-    return {
-        'daily': daily,
-        '4h': h4,
-        '1h': h1
-    }
+    daily = fetch_ohlcv_with_retry(fetch_func, symbol, tf_daily, CANDLES_DAILY)
+    time.sleep(0.1) # API rate limit
+    h4 = fetch_ohlcv_with_retry(fetch_func, symbol, tf_4h, CANDLES_4H)
+    time.sleep(0.1) # API rate limit
+    h1 = fetch_ohlcv_with_retry(fetch_func, symbol, tf_1h, CANDLES_1H)
+    
+    # 데이터 길이 검증 (각 분석 함수에서 추가 검증 필요)
+    if daily is None or h4 is None or h1 is None or \
+       len(daily) < TREND_CHECK_CANDLES or len(h4) < LEN_CHAN or len(h1) < RSI_PERIOD:
+        print(f"[{'OKX' if is_okx else 'Upbit'} MTF Data Warning] Insufficient data length for {symbol} after fetch.")
+        return None
 
-def fetch_mtf_data_upbit(symbol):
-    """Upbit에서 다중 시간대 데이터 가져오기"""
-    daily = fetch_ohlcv_upbit(symbol, INTERVAL_UPBIT_DAILY, CANDLES_DAILY)
-    h4 = fetch_ohlcv_upbit(symbol, INTERVAL_UPBIT_4H, CANDLES_4H)
-    h1 = fetch_ohlcv_upbit(symbol, INTERVAL_UPBIT_1H, CANDLES_1H)
-    return {
-        'daily': daily,
-        '4h': h4,
-        '1h': h1
-    }
+    return {'daily': daily, '4h': h4, '1h': h1}
+
 
 # ─────────── 기술적 분석 함수 ───────────
 
 def check_trend(df, side):
     """
-    추세 분석 - Higher Highs & Higher Lows 또는 Lower Highs & Lower Lows 확인
+    추세 분석 - 최근 TREND_CHECK_CANDLES 동안 연속적인 HH/HL 또는 LH/LL 확인
     """
-    highs = df['high'].values
-    lows = df['low'].values
-    
+    if len(df) < TREND_CHECK_CANDLES:
+        return False
+
+    highs = df['high'].values[-TREND_CHECK_CANDLES:]
+    lows = df['low'].values[-TREND_CHECK_CANDLES:]
+
     if side == 'long':
-        # 상승 추세 확인 (Higher Highs & Higher Lows)
-        higher_highs = True
-        higher_lows = True
-        
-        for i in range(TREND_CHECK_DAYS, 1, -1):
-            if highs[-i] >= highs[-i+2]:  # 고점이 이전 고점보다 낮으면
-                higher_highs = False
-            if lows[-i] >= lows[-i+2]:    # 저점이 이전 저점보다 낮으면
-                higher_lows = False
-        
-        # Higher Highs와 Higher Lows 둘 다 충족해야 함
-        return higher_highs and higher_lows
-    
+        # 모든 고점이 이전 고점보다 높거나 같고 (최소 하나는 확실히 높아야 함), 모든 저점이 이전 저점보다 높음
+        all_higher_highs = all(highs[i] >= highs[i-1] for i in range(1, len(highs))) and any(highs[i] > highs[i-1] for i in range(1, len(highs)))
+        all_higher_lows = all(lows[i] > lows[i-1] for i in range(1, len(lows)))
+        return all_higher_highs and all_higher_lows
     elif side == 'short':
-        # 하락 추세 확인 (Lower Highs & Lower Lows)
-        lower_highs = True
-        lower_lows = True
-        
-        for i in range(TREND_CHECK_DAYS, 1, -1):
-            if highs[-i] <= highs[-i+2]:  # 고점이 이전 고점보다 높으면
-                lower_highs = False
-            if lows[-i] <= lows[-i+2]:    # 저점이 이전 저점보다 높으면
-                lower_lows = False
-        
-        # Lower Highs와 Lower Lows 둘 다 충족해야 함
-        return lower_highs and lower_lows
-    
+        # 모든 고점이 이전 고점보다 낮고, 모든 저점이 이전 저점보다 낮거나 같음 (최소 하나는 확실히 낮아야 함)
+        all_lower_highs = all(highs[i] < highs[i-1] for i in range(1, len(highs)))
+        all_lower_lows = all(lows[i] <= lows[i-1] for i in range(1, len(lows))) and any(lows[i] < lows[i-1] for i in range(1, len(lows)))
+        return all_lower_highs and all_lower_lows
     return False
 
 def analyze_channel(df):
-    """
-    채널 분석 - EMA 기반 채널 계산 및 위치 확인
-    """
+    """채널 분석 - EMA 기반 채널 계산 및 위치 확인"""
+    if len(df) < LEN_CHAN:
+        print(f"[Channel Analysis Warning] Insufficient data length for channel: {len(df)} < {LEN_CHAN}")
+        return None
     close = df['close']
     
-    # EMA 채널 계산
     basis = ta.trend.ema_indicator(close, window=LEN_CHAN)
-    dev = (close - basis).abs().rolling(LEN_CHAN).max()
+    if basis is None or basis.isnull().all(): return None # EMA 계산 실패
+        
+    dev = (close - basis).abs().rolling(window=LEN_CHAN, min_periods=max(1, LEN_CHAN//2)).max() # min_periods 추가
+    if dev is None or dev.isnull().all(): return None
+
+    # 마지막 값들이 유효한지 확인
+    if pd.isna(basis.iloc[-1]) or pd.isna(dev.iloc[-1]) or pd.isna(close.iloc[-1]):
+        return None
+
     lower = basis - dev
     upper = basis + dev
-    mid = (upper + lower) / 2  # 0.5 중간선
-    
-    # 현재 가격이 채널 내 어디에 위치하는지 계산 (0~1, 0=하단, 0.5=중간, 1=상단)
+    mid = (upper + lower) / 2
+
+    if pd.isna(lower.iloc[-1]) or pd.isna(upper.iloc[-1]) or (upper.iloc[-1] - lower.iloc[-1]) == 0:
+        return None # 채널 폭이 0이거나 계산 불가
+
     channel_position = (close.iloc[-1] - lower.iloc[-1]) / (upper.iloc[-1] - lower.iloc[-1])
-    
-    # 채널 기울기 (상승/하락 강도)
-    channel_slope = (basis.iloc[-1] - basis.iloc[-5]) / basis.iloc[-5]
+    channel_slope = (basis.iloc[-1] - basis.iloc[-5]) / basis.iloc[-5] if len(basis) >= 5 and not pd.isna(basis.iloc[-5]) and basis.iloc[-5] != 0 else 0
     
     return {
-        'lower': lower.iloc[-1],
-        'upper': upper.iloc[-1],
-        'mid': mid.iloc[-1],
-        'position': channel_position,
-        'slope': channel_slope,
-        'width': (upper.iloc[-1] - lower.iloc[-1]) / mid.iloc[-1]  # 채널 폭 (%)
+        'lower': lower.iloc[-1], 'upper': upper.iloc[-1], 'mid': mid.iloc[-1],
+        'position': channel_position, 'slope': channel_slope,
+        'width': (upper.iloc[-1] - lower.iloc[-1]) / mid.iloc[-1] if mid.iloc[-1] !=0 else 0
     }
 
-def analyze_rsi(df, side):
-    """
-    RSI 분석 - 과매수/과매도 및 다이버전스 확인
-    """
+def analyze_rsi(df, side): # side 파라미터는 다이버전스 방향성 위해 유지 (현재는 미사용)
+    """RSI 분석 - 과매수/과매도 및 다이버전스 확인"""
+    if len(df) < RSI_PERIOD + DIVERGENCE_LOOKBACK: # 다이버전스 계산 위해 충분한 데이터 필요
+        print(f"[RSI Analysis Warning] Insufficient data length: {len(df)}")
+        return None
+        
     close = df['close']
-    high = df['high']
-    low = df['low']
-    
-    # RSI 계산
-    rsi = ta.momentum.rsi(close, window=RSI_PERIOD)
-    current_rsi = rsi.iloc[-1]
-    
-    # 과매수/과매도 상태 확인
+    rsi_series = ta.momentum.rsi(close, window=RSI_PERIOD)
+    if rsi_series is None or rsi_series.isnull().all() or len(rsi_series) < DIVERGENCE_LOOKBACK:
+        return None
+    current_rsi = rsi_series.iloc[-1]
+    if pd.isna(current_rsi): return None
+
     oversold = current_rsi < RSI_OVERSOLD
     overbought = current_rsi > RSI_OVERBOUGHT
     
-    # 다이버전스 확인
-    bull_div = False  # 상승 다이버전스 (가격↓ RSI↑)
-    bear_div = False  # 하락 다이버전스 (가격↑ RSI↓)
+    bull_div = False
+    bear_div = False
     
-    # 지난 N봉 사이에서 다이버전스 찾기
-    for i in range(3, DIVERGENCE_LOOKBACK + 1):
-        # 상승 다이버전스: 가격은 낮은 저점, RSI는 높은 저점
-        if low.iloc[-1] < low.iloc[-i] and rsi.iloc[-1] > rsi.iloc[-i]:
-            bull_div = True
-            break
-            
-        # 하락 다이버전스: 가격은 높은 고점, RSI는 낮은 고점
-        if high.iloc[-1] > high.iloc[-i] and rsi.iloc[-1] < rsi.iloc[-i]:
-            bear_div = True
-            break
+    # 다이버전스 확인 (최근 DIVERGENCE_LOOKBACK 봉 기준)
+    # 가격: 저점은 낮아지는데, RSI 저점은 높아지는 경우 (상승 다이버전스)
+    # 가격: 고점은 높아지는데, RSI 고점은 낮아지는 경우 (하락 다이버전스)
+    #주의: df['low'] / df['high'] 는 전체 df 기준, rsi_series는 RSI_PERIOD 이후부터 값 존재. 인덱싱 주의.
     
-    return {
-        'value': current_rsi,
-        'oversold': oversold,
-        'overbought': overbought,
-        'bull_div': bull_div,
-        'bear_div': bear_div
-    }
+    # 다이버전스 검출을 위해 가격 데이터와 RSI 데이터의 최근 DIVERGENCE_LOOKBACK 기간을 사용
+    recent_prices_low = df['low'].iloc[-DIVERGENCE_LOOKBACK:]
+    recent_prices_high = df['high'].iloc[-DIVERGENCE_LOOKBACK:]
+    recent_rsi = rsi_series.iloc[-DIVERGENCE_LOOKBACK:]
+
+    if len(recent_prices_low) < 2 or len(recent_rsi) < 2: # 최소 2점 비교
+        return {'value': current_rsi, 'oversold': oversold, 'overbought': overbought, 'bull_div': False, 'bear_div': False}
+
+    # 상승 다이버전스: 가격 저점 하락, RSI 저점 상승
+    min_price_idx = recent_prices_low.idxmin()
+    min_rsi_idx = recent_rsi.idxmin()
+    if recent_prices_low.iloc[-1] < recent_prices_low.iloc[0] and recent_rsi.iloc[-1] > recent_rsi.iloc[0]: # 단순화된 시작/끝점 비교
+         # 좀 더 정교한 로직: 최근 N개 봉에서 최저점과 그 이전 최저점을 비교
+        if len(recent_prices_low) >= 3: # 최소 3개 봉 이상일 때
+            idx_last_low = len(recent_prices_low) - 1 - np.argmin(np.array(recent_prices_low)[::-1]) # 마지막 저점
+            idx_prev_lows = recent_prices_low.iloc[:idx_last_low]
+            if not idx_prev_lows.empty:
+                idx_prev_low = idx_prev_lows.idxmin()
+                if recent_prices_low.loc[recent_prices_low.index[idx_last_low]] < recent_prices_low.loc[idx_prev_low] and \
+                   recent_rsi.loc[recent_rsi.index[idx_last_low]] > recent_rsi.loc[idx_prev_low]:
+                    bull_div = True
+    
+    # 하락 다이버전스: 가격 고점 상승, RSI 고점 하락
+    max_price_idx = recent_prices_high.idxmax()
+    max_rsi_idx = recent_rsi.idxmax()
+    if recent_prices_high.iloc[-1] > recent_prices_high.iloc[0] and recent_rsi.iloc[-1] < recent_rsi.iloc[0]: # 단순화된 시작/끝점 비교
+        if len(recent_prices_high) >= 3:
+            idx_last_high = len(recent_prices_high) - 1 - np.argmax(np.array(recent_prices_high)[::-1]) # 마지막 고점
+            idx_prev_highs = recent_prices_high.iloc[:idx_last_high]
+            if not idx_prev_highs.empty:
+                idx_prev_high = idx_prev_highs.idxmax()
+                if recent_prices_high.loc[recent_prices_high.index[idx_last_high]] > recent_prices_high.loc[idx_prev_high] and \
+                   recent_rsi.loc[recent_rsi.index[idx_last_high]] < recent_rsi.loc[idx_prev_high]:
+                    bear_div = True
+                    
+    return {'value': current_rsi, 'oversold': oversold, 'overbought': overbought, 'bull_div': bull_div, 'bear_div': bear_div}
 
 def analyze_volume_profile(df):
-    """
-    매물대 분석 - 과거 거래량 집중 구간 확인
-    """
-    # 가격 범위 설정
-    price_min = df['low'].min()
-    price_max = df['high'].max()
-    price_range = price_max - price_min
-    
-    # 가격 구간 나누기 (10개 구간)
-    bins = np.linspace(price_min, price_max, 11)
-    
-    # 각 봉마다 해당 가격 구간에 거래량 할당
-    volume_profile = np.zeros(10)
-    
-    for i in range(len(df) - VOLUME_PROFILE_PERIODS, len(df)):
-        # 각 봉의 거래 범위
-        candle_min = df['low'].iloc[i]
-        candle_max = df['high'].iloc[i]
-        candle_volume = df['volume'].iloc[i]
+    """매물대 분석 - 최근 VOLUME_PROFILE_PERIODS 기간 거래량 집중 구간 확인"""
+    if len(df) < VOLUME_PROFILE_PERIODS:
+        print(f"[Volume Profile Warning] Insufficient data: {len(df)} < {VOLUME_PROFILE_PERIODS}")
+        return None
         
-        # 봉이 걸쳐있는 구간들에 거래량 비례 배분
+    profile_df = df.iloc[-VOLUME_PROFILE_PERIODS:]
+    price_min = profile_df['low'].min()
+    price_max = profile_df['high'].max()
+    if pd.isna(price_min) or pd.isna(price_max) or price_min == price_max: return None
+
+    bins = np.linspace(price_min, price_max, 11) # 10개 구간
+    volume_at_price = np.zeros(10)
+    
+    for _, row in profile_df.iterrows():
+        candle_low, candle_high, candle_vol = row['low'], row['high'], row['volume']
+        if pd.isna(candle_low) or pd.isna(candle_high) or pd.isna(candle_vol) or candle_vol == 0: continue
+        
+        candle_price_range = candle_high - candle_low
+        
         for j in range(10):
-            bin_min = bins[j]
-            bin_max = bins[j+1]
+            bin_low, bin_high = bins[j], bins[j+1]
+            overlap_low = max(candle_low, bin_low)
+            overlap_high = min(candle_high, bin_high)
             
-            # 해당 구간과 봉의 겹치는 부분 계산
-            overlap_min = max(candle_min, bin_min)
-            overlap_max = min(candle_max, bin_max)
-            
-            if overlap_max > overlap_min:
-                # 겹치는 비율만큼 거래량 할당
-                overlap_ratio = (overlap_max - overlap_min) / (candle_max - candle_min)
-                volume_profile[j] += candle_volume * overlap_ratio
+            if overlap_high > overlap_low:
+                if candle_price_range > 0:
+                    overlap_ratio = (overlap_high - overlap_low) / candle_price_range
+                    volume_at_price[j] += candle_vol * overlap_ratio
+                elif candle_low >= bin_low and candle_high <= bin_high: # 가격 변동 없는 봉이 구간 내 포함
+                    volume_at_price[j] += candle_vol
+
+
+    if np.sum(volume_at_price) == 0: return None # 거래량이 없는 경우
+        
+    max_vol_bin_idx = np.argmax(volume_at_price)
+    poc_min, poc_max = bins[max_vol_bin_idx], bins[max_vol_bin_idx+1] # Point of Control range
     
-    # 최대 거래량 구간 찾기
-    max_volume_bin = np.argmax(volume_profile)
-    
-    # 현재 가격과 최대 거래량 구간의 관계
     current_price = df['close'].iloc[-1]
-    max_vol_price_min = bins[max_volume_bin]
-    max_vol_price_max = bins[max_volume_bin + 1]
-    
-    # 현재 가격이 최대 거래량 구간에 얼마나 가까운지 계산 (0~1, 0=매우 가까움)
-    if current_price >= max_vol_price_min and current_price <= max_vol_price_max:
-        distance = 0  # 구간 내에 있음
+    if pd.isna(current_price): return None
+        
+    distance_to_poc
+    if current_price >= poc_min and current_price <= poc_max:
+        distance_to_poc = 0
     else:
-        # 구간까지의 거리를 전체 가격 범위로 정규화
-        distance = min(
-            abs(current_price - max_vol_price_min),
-            abs(current_price - max_vol_price_max)
-        ) / price_range
-    
-    return {
-        'max_vol_price_min': max_vol_price_min,
-        'max_vol_price_max': max_vol_price_max,
-        'distance': distance,
-        'volume_profile': volume_profile.tolist()
-    }
+        distance_to_poc = min(abs(current_price - poc_min), abs(current_price - poc_max)) / (price_max - price_min)
+
+    return {'poc_min': poc_min, 'poc_max': poc_max, 'distance': distance_to_poc}
+
 
 def calculate_risk_reward(df, side, channel_data):
-    """
-    손익비 계산 - 리스크 대비 리워드 비율 확인
-    """
+    """손익비 계산"""
+    if channel_data is None or len(df) < 2: return None
     close = df['close'].iloc[-1]
-    
+    if pd.isna(close): return None
+
     if side == 'long':
-        # 롱 포지션의 경우
-        # 손절: 직전 저점 또는 채널 하단 -2%
-        stop_loss = min(df['low'].iloc[-2], channel_data['lower'] * 0.98)
-        
-        # 익절: 채널 중단선 또는 채널 상단
+        stop_loss = min(df['low'].iloc[-TREND_CHECK_CANDLES:].min(), channel_data['lower'] * 0.985) # 최근 N개 저점 또는 채널하단-1.5%
         take_profit_mid = channel_data['mid']
         take_profit_upper = channel_data['upper']
-        
-        # 손익비 계산 (리워드/리스크)
+        if pd.isna(stop_loss) or pd.isna(take_profit_mid): return None
+
         risk = close - stop_loss
         reward_mid = take_profit_mid - close
-        reward_upper = take_profit_upper - close
         
-        # 중간선까지의 손익비
-        rr_mid = reward_mid / risk if risk > 0 else 0
-        # 상단까지의 손익비
-        rr_upper = reward_upper / risk if risk > 0 else 0
+        rr_mid = reward_mid / risk if risk > 0.000001 else 0 # 0으로 나누기 방지
+        return {'rr_mid': rr_mid, 'meets_min_rr': rr_mid >= MIN_RISK_REWARD, 'stop_loss': stop_loss, 'take_profit': take_profit_mid}
         
-        return {
-            'stop_loss': stop_loss,
-            'take_profit_mid': take_profit_mid,
-            'take_profit_upper': take_profit_upper,
-            'risk': risk,
-            'reward_mid': reward_mid,
-            'reward_upper': reward_upper,
-            'rr_mid': rr_mid,
-            'rr_upper': rr_upper,
-            'meets_min_rr': rr_mid >= MIN_RISK_REWARD
-        }
-    
     elif side == 'short':
-        # 숏 포지션의 경우
-        # 손절: 직전 고점 또는 채널 상단 +2%
-        stop_loss = max(df['high'].iloc[-2], channel_data['upper'] * 1.02)
-        
-        # 익절: 채널 중단선 또는 채널 하단
+        stop_loss = max(df['high'].iloc[-TREND_CHECK_CANDLES:].max(), channel_data['upper'] * 1.015) # 최근 N개 고점 또는 채널상단+1.5%
         take_profit_mid = channel_data['mid']
         take_profit_lower = channel_data['lower']
-        
-        # 손익비 계산 (리워드/리스크)
+        if pd.isna(stop_loss) or pd.isna(take_profit_mid): return None
+            
         risk = stop_loss - close
         reward_mid = close - take_profit_mid
-        reward_lower = close - take_profit_lower
         
-        # 중간선까지의 손익비
-        rr_mid = reward_mid / risk if risk > 0 else 0
-        # 하단까지의 손익비
-        rr_lower = reward_lower / risk if risk > 0 else 0
-        
-        return {
-            'stop_loss': stop_loss,
-            'take_profit_mid': take_profit_mid,
-            'take_profit_lower': take_profit_lower,
-            'risk': risk,
-            'reward_mid': reward_mid,
-            'reward_lower': reward_lower,
-            'rr_mid': rr_mid,
-            'rr_lower': rr_lower,
-            'meets_min_rr': rr_mid >= MIN_RISK_REWARD
-        }
-    
+        rr_mid = reward_mid / risk if risk > 0.000001 else 0
+        return {'rr_mid': rr_mid, 'meets_min_rr': rr_mid >= MIN_RISK_REWARD, 'stop_loss': stop_loss, 'take_profit': take_profit_mid}
     return None
 
 def check_sma_margin(df):
     """SMA20 근처 여부 확인"""
-    close = df['close']
-    sma20 = close.rolling(20).mean()
-    current_price = close.iloc[-1]
-    current_sma = sma20.iloc[-1]
+    if len(df) < 20: return False
+    close_price = df['close'].iloc[-1]
+    sma20 = ta.trend.sma_indicator(df['close'], window=20).iloc[-1]
+    if pd.isna(close_price) or pd.isna(sma20) or sma20 == 0 : return False
     
-    # 현재 가격이 SMA20에서 ±2% 이내인지 확인
-    deviation = abs(current_price - current_sma) / current_sma
-    return deviation <= SMA_DEVIATION
+    return abs(close_price - sma20) / sma20 <= SMA_DEVIATION
 
 # ─────────── 4-Step 분석 함수 (개선됨) ───────────
 
 def four_step_analysis(mtf_data, side):
-    """
-    개선된 4-Step 분석: 다중 시간대 분석을 통한 신호 평가
-    """
+    """개선된 4-Step 분석: 다중 시간대 분석을 통한 신호 평가"""
+    if mtf_data is None: return {'valid': False, 'strength': 0, 'details': {}, 'risk_reward': None}
+
     results = {}
-    weights = {}
     
-    # 1. 상위 시간대 추세 분석 (일봉)
+    # 각 분석 결과가 None일 경우 처리
     daily_trend = check_trend(mtf_data['daily'], side)
-    results['daily_trend'] = daily_trend
-    weights['daily_trend'] = WEIGHT_TREND * 0.4  # 40% 가중치
     
-    # 2. 중간 시간대 분석 (4시간봉)
     h4_trend = check_trend(mtf_data['4h'], side)
     h4_channel = analyze_channel(mtf_data['4h'])
-    h4_rsi = analyze_rsi(mtf_data['4h'], side)
+    h4_rsi = analyze_rsi(mtf_data['4h'], side) # side 전달
     h4_volume = analyze_volume_profile(mtf_data['4h'])
     h4_risk_reward = calculate_risk_reward(mtf_data['4h'], side, h4_channel)
     
-    results['h4_trend'] = h4_trend
-    results['h4_channel'] = h4_channel
-    results['h4_rsi'] = h4_rsi
-    results['h4_volume'] = h4_volume
-    results['h4_risk_reward'] = h4_risk_reward
-    
-    weights['h4_trend'] = WEIGHT_TREND * 0.4  # 40% 가중치
-    weights['h4_channel'] = WEIGHT_CHANNEL * 0.6  # 60% 가중치
-    weights['h4_rsi'] = WEIGHT_RSI * 0.6  # 60% 가중치
-    weights['h4_volume'] = WEIGHT_VOLUME_PROFILE * 0.7  # 70% 가중치
-    
-    # 3. 하위 시간대 분석 (1시간봉)
-    h1_trend = check_trend(mtf_data['1h'], side)
-    h1_channel = analyze_channel(mtf_data['1h'])
-    h1_rsi = analyze_rsi(mtf_data['1h'], side)
+    h1_channel = analyze_channel(mtf_data['1h']) # 1H 채널도 참고용으로 분석
+    h1_rsi = analyze_rsi(mtf_data['1h'], side) # side 전달
     h1_sma_margin = check_sma_margin(mtf_data['1h'])
+
+    results = {
+        'daily_trend': daily_trend, 'h4_trend': h4_trend, 'h4_channel': h4_channel,
+        'h4_rsi': h4_rsi, 'h4_volume': h4_volume, 'h4_risk_reward': h4_risk_reward,
+        'h1_channel': h1_channel, 'h1_rsi': h1_rsi, 'h1_sma_margin': h1_sma_margin
+    }
     
-    results['h1_trend'] = h1_trend
-    results['h1_channel'] = h1_channel
-    results['h1_rsi'] = h1_rsi
-    results['h1_sma_margin'] = h1_sma_margin
-    
-    weights['h1_trend'] = WEIGHT_TREND * 0.2  # 20% 가중치
-    weights['h1_channel'] = WEIGHT_CHANNEL * 0.4  # 40% 가중치
-    weights['h1_rsi'] = WEIGHT_RSI * 0.4  # 40% 가중치
-    
-    # 4. 신호 평가 및 종합 점수 계산
-    # 롱 포지션 조건
+    # 필수 분석 결과 누락 시 유효하지 않은 신호로 처리
+    if not all([daily_trend is not None, h4_trend is not None, h4_channel, h4_rsi, 
+                h4_volume, h4_risk_reward, h1_channel, h1_rsi, h1_sma_margin is not None]):
+        print(f"[4-Step Validation Fail] Missing critical analysis data for {side}.")
+        return {'valid': False, 'strength': 0, 'details': results, 'risk_reward': None}
+
+    # 신호 평가 및 종합 점수 계산
     if side == 'long':
-        # 추세 조건
-        trend_condition = (
-            (daily_trend) or  # 일봉 상승 추세
-            (h4_trend and h1_trend)  # 4시간 및 1시간 모두 상승 추세
-        )
-        
-        # 채널 조건
-        channel_condition = (
-            h4_channel['position'] <= 0.2 or  # 4시간 채널 하단 20% 이내
-            h1_channel['position'] <= 0.15  # 1시간 채널 하단 15% 이내
-        )
-        
-        # RSI 조건
-        rsi_condition = (
-            h4_rsi['oversold'] or  # 4시간 RSI 과매도
-            h4_rsi['bull_div'] or  # 4시간 상승 다이버전스
-            h1_rsi['oversold'] or  # 1시간 RSI 과매도
-            h1_rsi['bull_div']  # 1시간 상승 다이버전스
-        )
-        
-        # 추가 조건
-        additional_condition = (
-            h1_sma_margin and  # 1시간 SMA20 근처
-            h4_risk_reward['meets_min_rr']  # 최소 손익비 충족
-        )
-        
-    # 숏 포지션 조건
+        trend_condition = daily_trend or (h4_trend) # 일봉 추세 또는 4시간봉 추세 (둘 중 하나 만족)
+        channel_condition = h4_channel['position'] <= 0.25 or \
+                            (h1_channel['position'] <= 0.2 and h4_channel['position'] <= 0.35) # 4시간봉 채널 하단 또는 1시간봉 채널 하단 근접
+        rsi_condition = h4_rsi['oversold'] or h4_rsi['bull_div'] or \
+                        (h1_rsi['oversold'] or h1_rsi['bull_div']) # 4시간 또는 1시간 RSI 조건
+        additional_condition = h1_sma_margin and h4_risk_reward['meets_min_rr'] and h4_volume['distance'] <= 0.3 # SMA, 손익비, 매물대 근접
     elif side == 'short':
-        # 추세 조건
-        trend_condition = (
-            (not daily_trend) or  # 일봉 하락 추세
-            (not h4_trend and not h1_trend)  # 4시간 및 1시간 모두 하락 추세
-        )
-        
-        # 채널 조건
-        channel_condition = (
-            h4_channel['position'] >= 0.8 or  # 4시간 채널 상단 20% 이내
-            h1_channel['position'] >= 0.85  # 1시간 채널 상단 15% 이내
-        )
-        
-        # RSI 조건
-        rsi_condition = (
-            h4_rsi['overbought'] or  # 4시간 RSI 과매수
-            h4_rsi['bear_div'] or  # 4시간 하락 다이버전스
-            h1_rsi['overbought'] or  # 1시간 RSI 과매수
-            h1_rsi['bear_div']  # 1시간 하락 다이버전스
-        )
-        
-        # 추가 조건
-        additional_condition = (
-            h1_sma_margin and  # 1시간 SMA20 근처
-            h4_risk_reward['meets_min_rr']  # 최소 손익비 충족
-        )
-    
-    # 종합 판단
+        trend_condition = daily_trend or (h4_trend) # 수정: not daily_trend -> daily_trend (check_trend가 이미 side에 맞게 하락추세 확인)
+        channel_condition = h4_channel['position'] >= 0.75 or \
+                            (h1_channel['position'] >= 0.8 and h4_channel['position'] >= 0.65)
+        rsi_condition = h4_rsi['overbought'] or h4_rsi['bear_div'] or \
+                        (h1_rsi['overbought'] or h1_rsi['bear_div'])
+        additional_condition = h1_sma_margin and h4_risk_reward['meets_min_rr'] and h4_volume['distance'] <= 0.3
+    else: return {'valid': False, 'strength': 0, 'details': results, 'risk_reward': h4_risk_reward}
+
     signal_valid = trend_condition and channel_condition and rsi_condition and additional_condition
     
-    # 신호 강도 계산 (0~100)
     signal_strength = 0
     if signal_valid:
-        # 추세 점수 (0~30)
-        trend_score = (
-            (30 if daily_trend else 0) if side == 'long' else 
-            (30 if not daily_trend else 0)
-        )
+        # 점수 체계: 추세(30), 채널(25), RSI(25), 매물대(20) = 총 100점
+        # WEIGHT_ 상수는 현재 점수계산에 직접 사용되지 않음 (향후 개선 시 반영 고려)
+        trend_score = 30 if daily_trend else (15 if h4_trend else 0) # 일봉 추세에 더 큰 가중치
         
-        # 채널 점수 (0~25)
+        channel_score_h4 = (1 - h4_channel['position']) if side == 'long' else h4_channel['position']
+        channel_score_h1 = (1 - h1_channel['position']) if side == 'long' else h1_channel['position']
+        channel_score = 25 * max(channel_score_h4 * 0.7, channel_score_h1 * 0.3) # 4시간봉 채널에 더 비중
+
+        rsi_val_h4, rsi_val_h1 = h4_rsi['value'], h1_rsi['value']
         if side == 'long':
-            channel_score = 25 * (1 - h1_channel['position'])
-        else:
-            channel_score = 25 * h1_channel['position']
-        
-        # RSI 점수 (0~25)
-        if side == 'long':
-            rsi_score = 25 * (1 - min(h1_rsi['value'] / 50, 1))
-        else:
-            rsi_score = 25 * min(h1_rsi['value'] / 100, 1)
-        
-        # 매물대 점수 (0~20)
-        volume_score = 20 * (1 - h4_volume['distance'])
-        
+            rsi_score_h4 = (1 - min(rsi_val_h4 / RSI_OVERSOLD, 1)) if rsi_val_h4 <= RSI_OVERSOLD * 1.5 else 0 # 과매도 근처일수록 높은 점수
+            rsi_score_h1 = (1 - min(rsi_val_h1 / RSI_OVERSOLD, 1)) if rsi_val_h1 <= RSI_OVERSOLD * 1.5 else 0
+            rsi_score = 15 * rsi_score_h4 + 10 * rsi_score_h1
+            if h4_rsi['bull_div']: rsi_score = max(rsi_score, 20) # 다이버전스 발생 시 추가 점수
+            if h1_rsi['bull_div']: rsi_score = max(rsi_score, 22)
+        else: # short
+            rsi_score_h4 = min((rsi_val_h4 - RSI_OVERBOUGHT) / (100 - RSI_OVERBOUGHT), 1) if rsi_val_h4 >= RSI_OVERBOUGHT * 0.9 else 0
+            rsi_score_h1 = min((rsi_val_h1 - RSI_OVERBOUGHT) / (100 - RSI_OVERBOUGHT), 1) if rsi_val_h1 >= RSI_OVERBOUGHT * 0.9 else 0
+            rsi_score = 15 * rsi_score_h4 + 10 * rsi_score_h1
+            if h4_rsi['bear_div']: rsi_score = max(rsi_score, 20)
+            if h1_rsi['bear_div']: rsi_score = max(rsi_score, 22)
+        rsi_score = min(rsi_score, 25) # 최대 25점
+
+        volume_score = 20 * (1 - h4_volume['distance']) # 매물대 가까울수록 높은 점수
         signal_strength = trend_score + channel_score + rsi_score + volume_score
-    
-    return {
-        'valid': signal_valid,
-        'strength': signal_strength,
-        'details': results,
-        'risk_reward': h4_risk_reward
-    }
+        signal_strength = max(0, min(signal_strength, 100)) # 0~100점 범위
+
+    return {'valid': signal_valid, 'strength': signal_strength, 'details': results, 'risk_reward': h4_risk_reward}
 
 # ─────────── OKX 스캔 (선물) ───────────
-
 def scan_okx():
     """OKX 선물 스캔"""
-    longs = []
-    shorts = []
+    longs, shorts = [], []
+    markets = okx.load_markets()
     
-    for m in okx.load_markets().values():
-        if m['type'] != 'swap' or m['settle'] != 'USDT':
+    for symbol_key in markets:
+        m = markets[symbol_key]
+        if not (m['swap'] and m['settleId'] == 'USDT' and m.get('active', True)): # 스왑, USDT 정산, 활성 시장
             continue
         
-        sym = m['symbol']                           # BTC/USDT:USDT
+        sym = m['symbol']
+        base_symbol = m['baseId'] # 예: BTC
         
         try:
-            # 거래량 필터링
             tick = okx.fetch_ticker(sym)
-            vol = tick.get('quoteVolume') or 0
-            
-            if vol < VOL_MIN_USDT:
+            vol_24h_usdt = tick.get('quoteVolume') or 0
+            if vol_24h_usdt < VOL_MIN_USDT:
                 continue
-                
-            # 베이스 심볼 추출
-            base = sym.split(':')[0].replace('/USDT', '')
             
-            # 다중 시간대 데이터 가져오기
-            mtf_data = fetch_mtf_data_okx(sym)
-            time.sleep(0.2)  # API 속도 제한 준수
-            
+            print(f"[OKX Scan] Analyzing {sym} (Vol: {vol_24h_usdt:.0f} USDT)")
+            mtf_data = fetch_mtf_data(okx, sym, is_okx=True)
+            if mtf_data is None: continue # 데이터 가져오기 실패 시 건너뛰기
+            time.sleep(0.25) # API Rate Limit
+
             # 롱 포지션 분석
             long_analysis = four_step_analysis(mtf_data, 'long')
             if long_analysis['valid']:
-                longs.append({
-                    'symbol': base,
-                    'strength': long_analysis['strength'],
-                    'risk_reward': long_analysis['risk_reward']['rr_mid'],
-                    'rsi': long_analysis['details']['h1_rsi']['value']
-                })
-                # 신호 로깅
-                log_signal('okx', base, 'long', {
-                    'strength': long_analysis['strength'],
-                    'risk_reward': long_analysis['risk_reward']['rr_mid'],
-                    'rsi': long_analysis['details']['h1_rsi']['value']
-                })
+                rr = long_analysis['risk_reward']['rr_mid'] if long_analysis['risk_reward'] else 0
+                rsi_val = long_analysis['details']['h1_rsi']['value'] if long_analysis['details'].get('h1_rsi') else -1
+                longs.append({'symbol': base_symbol, 'strength': long_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+                log_signal('okx', base_symbol, 'long', {'strength': long_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
             
             # 숏 포지션 분석
             short_analysis = four_step_analysis(mtf_data, 'short')
             if short_analysis['valid']:
-                shorts.append({
-                    'symbol': base,
-                    'strength': short_analysis['strength'],
-                    'risk_reward': short_analysis['risk_reward']['rr_mid'],
-                    'rsi': short_analysis['details']['h1_rsi']['value']
-                })
-                # 신호 로깅
-                log_signal('okx', base, 'short', {
-                    'strength': short_analysis['strength'],
-                    'risk_reward': short_analysis['risk_reward']['rr_mid'],
-                    'rsi': short_analysis['details']['h1_rsi']['value']
-                })
-                
-        except Exception as e:
-            print(f"[OKX skip] {sym}: {e}")
+                rr = short_analysis['risk_reward']['rr_mid'] if short_analysis['risk_reward'] else 0
+                rsi_val = short_analysis['details']['h1_rsi']['value'] if short_analysis['details'].get('h1_rsi') else -1
+                shorts.append({'symbol': base_symbol, 'strength': short_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+                log_signal('okx', base_symbol, 'short', {'strength': short_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+
+        except ccxt.RateLimitExceeded as e:
+            print(f"[OKX RateLimit] {sym}: {e}. Sleeping for 60s...")
+            time.sleep(60)
+        except (ccxt.NetworkError, ccxt.ExchangeError, Exception) as e:
+            print(f"[OKX Error] Skipping {sym}: {type(e).__name__} - {e}")
+            # 특정 심볼 오류 시 로그 남기기 (선택적)
+            # log_signal('okx_error', sym, 'error', {'message': str(e)})
     
-    # 신호 강도로 정렬
     longs.sort(key=lambda x: x['strength'], reverse=True)
     shorts.sort(key=lambda x: x['strength'], reverse=True)
-    
-    # 심볼만 추출
-    long_symbols = [item['symbol'] for item in longs]
-    short_symbols = [item['symbol'] for item in shorts]
-    
-    return long_symbols, short_symbols
+    return [f"{item['symbol']} ({item['strength']:.0f}|{item['rr']:.1f})" for item in longs], \
+           [f"{item['symbol']} ({item['strength']:.0f}|{item['rr']:.1f})" for item in shorts]
+
 
 # ─────────── Upbit 스캔 (현물) ───────────
-
 def scan_upbit():
     """Upbit 현물 스캔"""
     spot = []
-    
-    for m in upbit.load_markets().values():
-        if m['quote'] != 'KRW':
+    markets = upbit.load_markets()
+
+    for symbol_key in markets:
+        m = markets[symbol_key]
+        if m['quoteId'] != 'KRW' or not m.get('active', True): # 원화마켓, 활성 시장
             continue
         
-        sym = m['symbol']  # BTC/KRW
-        
+        sym = m['symbol'] # 예: BTC/KRW
+        base_symbol = m['baseId'] # 예: BTC
+
         try:
-            # 거래량 필터링
+            # Upbit ticker fetch: "no Route matched" 오류 발생 시 ccxt 라이브러리 업데이트 또는
+            # upbit.fetch_tickers()로 전체 티커를 가져와서 해당 심볼을 찾는 방법 고려.
+            # 또는 ccxt Upbit 클래스에서 market ID ('KRW-BTC')를 직접 사용하는 방법도 있으나,
+            # 표준은 sym ('BTC/KRW') 사용.
             tick = upbit.fetch_ticker(sym)
-            vol_krw = tick['info'].get('acc_trade_price_24h', 0)
-            
-            if float(vol_krw) < VOL_MIN_KRW:
+            # Upbit API는 'acc_trade_price_24h' (누적거래대금-KRW) 제공
+            vol_24h_krw = float(tick['info'].get('acc_trade_price_24h', 0))
+            if vol_24h_krw < VOL_MIN_KRW:
                 continue
             
-            # 다중 시간대 데이터 가져오기
-            mtf_data = fetch_mtf_data_upbit(sym)
-            time.sleep(0.3)  # API 속도 제한 준수
-            
-            # 롱 포지션만 분석 (현물)
-            analysis = four_step_analysis(mtf_data, 'long')
+            print(f"[Upbit Scan] Analyzing {sym} (Vol: {vol_24h_krw:,.0f} KRW)")
+            mtf_data = fetch_mtf_data(upbit, sym, is_okx=False)
+            if mtf_data is None: continue
+            time.sleep(0.35) # API Rate Limit (Upbit이 OKX보다 좀 더 민감할 수 있음)
+
+            analysis = four_step_analysis(mtf_data, 'long') # 현물은 롱 포지션만
             if analysis['valid']:
-                base = sym.replace('/KRW', '')
-                spot.append({
-                    'symbol': base,
-                    'strength': analysis['strength'],
-                    'risk_reward': analysis['risk_reward']['rr_mid'],
-                    'rsi': analysis['details']['h1_rsi']['value']
-                })
-                # 신호 로깅
-                log_signal('upbit', base, 'long', {
-                    'strength': analysis['strength'],
-                    'risk_reward': analysis['risk_reward']['rr_mid'],
-                    'rsi': analysis['details']['h1_rsi']['value']
-                })
-                
-        except Exception as e:
-            print(f"[Upbit skip] {sym}: {e}")
-    
-    # 신호 강도로 정렬
+                rr = analysis['risk_reward']['rr_mid'] if analysis['risk_reward'] else 0
+                rsi_val = analysis['details']['h1_rsi']['value'] if analysis['details'].get('h1_rsi') else -1
+                spot.append({'symbol': base_symbol, 'strength': analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+                log_signal('upbit', base_symbol, 'long', {'strength': analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+        
+        except ccxt.RateLimitExceeded as e:
+            print(f"[Upbit RateLimit] {sym}: {e}. Sleeping for 60s...")
+            time.sleep(60)
+        except (ccxt.NetworkError, ccxt.ExchangeError, Exception) as e:
+            print(f"[Upbit Error] Skipping {sym}: {type(e).__name__} - {e}")
+            # log_signal('upbit_error', sym, 'error', {'message': str(e)})
+
     spot.sort(key=lambda x: x['strength'], reverse=True)
-    
-    # 심볼만 추출
-    spot_symbols = [item['symbol'] for item in spot]
-    
-    return spot_symbols
+    return [f"{item['symbol']} ({item['strength']:.0f}|{item['rr']:.1f})" for item in spot]
 
 # ─────────── 텔레그램 ───────────
-
 def send_telegram(msg):
     """텔레그램으로 메시지 전송"""
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TG_CHAT, "text": msg, "parse_mode": "Markdown"})
+    if not TG_TOKEN or not TG_CHAT:
+        print("Telegram TOKEN or CHAT_ID missing. Skipping notification.")
+        return
+    max_length = 4096
+    for i in range(0, len(msg), max_length):
+        chunk = msg[i:i+max_length]
+        try:
+            url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+            response = requests.post(url, json={"chat_id": TG_CHAT, "text": chunk, "parse_mode": "Markdown"})
+            response.raise_for_status() # 오류 발생 시 예외 처리
+            print("Telegram message sent successfully.")
+        except requests.exceptions.RequestException as e:
+            print(f"Failed to send Telegram message: {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred while sending Telegram message: {e}")
+
 
 # ─────────── 메인 ───────────
-
 def main():
     """메인 함수"""
+    start_time = time.time()
+    print(f"===== Signal Scan Started at {dt.datetime.now(dt.timezone(dt.timedelta(hours=9))):%Y-%m-%d %H:%M:%S KST} =====")
+    
     try:
-        # 스캔 실행
-        long_, short_ = scan_okx()
-        spot_ = scan_upbit()
+        long_results, short_results = scan_okx()
+        spot_results = scan_upbit()
         
-        # 현재 시간 (한국 시간)
-        now = dt.datetime.utcnow() + dt.timedelta(hours=9)
+        now_korea = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))) # 한국 시간
         
-        # 메시지 포맷팅
-        fmt = lambda x: ", ".join(x) if x else "―"
-        msg = (f"*📊 4-Step Signals — {now:%Y-%m-%d %H:%M} KST*\n\n"
-               f"*Long (OKX USDT-Perp)*\n{fmt(long_)}\n\n"
-               f"*Short (OKX USDT-Perp)*\n{fmt(short_)}\n\n"
-               f"*Spot (Upbit KRW)*\n{fmt(spot_)}")
+        fmt = lambda x_list: ", ".join(x_list) if x_list else "―"
+        msg_body = (f"📊 *4-Step Signals* — `{now_korea:%Y-%m-%d %H:%M} KST`\n\n"
+                    f"🎯 *Long (OKX USDT-Perp)*\n{fmt(long_results)}\n\n"
+                    f"📉 *Short (OKX USDT-Perp)*\n{fmt(short_results)}\n\n"
+                    f"💰 *Spot (Upbit KRW)*\n{fmt(spot_results)}")
         
-        # 텔레그램 전송
-        send_telegram(msg)
+        send_telegram(msg_body)
         
-        print(f"✅ Signal scanning completed at {now:%Y-%m-%d %H:%M} KST")
-        print(f"Long signals: {len(long_)}, Short signals: {len(short_)}, Spot signals: {len(spot_)}")
-        
+        elapsed_time = time.time() - start_time
+        print(f"Long signals: {len(long_results)}, Short signals: {len(short_results)}, Spot signals: {len(spot_results)}")
+        print(f"===== Signal Scan Completed in {elapsed_time:.2f} seconds =====")
+
     except Exception as e:
-        error_msg = f"❌ Error in signal bot: {str(e)}"
+        error_msg = f"❌ Critical Error in signal bot main process: {type(e).__name__} - {str(e)}"
         print(error_msg)
-        send_telegram(f"*ERROR*: {error_msg}")
+        send_telegram(f"*CRITICAL ERROR*: {error_msg}")
 
 if __name__ == "__main__":
-    # 환경변수 확인
     if not TG_TOKEN or not TG_CHAT:
-        sys.exit("❌ TG_TOKEN / TG_CHAT missing")
+        print("❌ TG_TOKEN / TG_CHAT environment variables missing. Telegram notifications will be disabled.")
+        # sys.exit("❌ TG_TOKEN / TG_CHAT environment variables missing") # 필요 시 활성화
     
-    # 메인 실행
     main()
