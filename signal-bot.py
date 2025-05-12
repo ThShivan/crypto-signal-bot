@@ -20,16 +20,25 @@ LEN_CHAN      = 120
 MARGIN        = 0.02                # 2 %
 
 # ────────────────────────────────────────────────
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.bybit.com/",
+}
+
 def safe_get(url, params=None, tries=3, wait=2):
     for i in range(1, tries + 1):
         try:
-            r = requests.get(url, params=params, timeout=10)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+            if r.status_code == 403:
+                raise Exception("403 Forbidden")
             r.raise_for_status()
             return r.json()
         except Exception as e:
             print(f"[safe_get] {url} (try {i}/{tries}) → {e}")
             time.sleep(wait)
     return None
+
 
 # 1) USDT-Perp 심볼 전체
 def get_bybit_symbols():
@@ -87,7 +96,7 @@ def scan():
     longs, shorts = [], []
     for s in symbols:
         try:
-            closes = fetch_close_series(s); time.sleep(0.15)
+            closes = fetch_close_series(s); time.sleep(0.3)
             if four_step(closes, "long"):  longs.append(s)
             if four_step(closes, "short"): shorts.append(s)
         except Exception as e:
