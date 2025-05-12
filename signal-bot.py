@@ -48,20 +48,28 @@ def send_telegram(msg):
 
 # ─────────────────── 스캔 ──────────────────────────
 def scan_okx():
-    longs, shorts = [], []
+    longs, shorts = []
     for m in okx.load_markets().values():
-        if m['type']!='swap' or m['settle']!='USDT': continue     # 선물 Perp
-        sym = m['symbol']                                         # BTC/USDT:USDT
+        if m['type'] != 'swap' or m['settle'] != 'USDT':
+            continue
+        sym = m['symbol']                      # BTC/USDT:USDT
         tick = okx.fetch_ticker(sym)
-        if tick['quoteVolume'] < VOL_MIN_USDT: continue
+
+        # ➜ 거래대금 값이 없으면 0 으로 간주해 필터에서 제외
+        vol = tick.get('quoteVolume') or tick.get('quoteVolume24h') or 0
+        if vol < VOL_MIN_USDT:
+            continue
+
         try:
             close = fetch_close(okx, sym); time.sleep(0.12)
-            stripped = sym.split(':')[0]                          # BTC/USDT
-            if four_step(close,'long'):  longs.append(stripped.replace('/USDT',''))
-            if four_step(close,'short'): shorts.append(stripped.replace('/USDT',''))
+            stripped = sym.split(':')[0]       # BTC/USDT
+            base = stripped.replace('/USDT', '')
+            if four_step(close, 'long'):  longs.append(base)
+            if four_step(close, 'short'): shorts.append(base)
         except Exception as e:
             print("[OKX skip]", sym, e)
     return longs, shorts
+
 
 def scan_upbit():
     spot = []
@@ -69,7 +77,7 @@ def scan_upbit():
         if m['quote']!='KRW': continue
         sym = m['symbol']                             # BTC/KRW
         tick = upbit.fetch_ticker(sym)
-        vol_krw = tick['quoteVolume']*tick['last']
+        vol_krw = tick.get('quoteVolume') * tick.get('last', 0) if tick.get('quoteVolume') else 0
         if vol_krw < VOL_MIN_KRW: continue
         try:
             close = fetch_close(upbit, sym); time.sleep(0.25)
