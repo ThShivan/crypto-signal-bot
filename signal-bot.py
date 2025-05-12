@@ -48,27 +48,28 @@ def send_telegram(msg):
 
 # ─────────────────── 스캔 ──────────────────────────
 def scan_okx():
-    longs, shorts = []
+    longs, shorts = [], []          # ← 수정: 두 리스트 동시 생성
     for m in okx.load_markets().values():
         if m['type'] != 'swap' or m['settle'] != 'USDT':
             continue
-        sym = m['symbol']                      # BTC/USDT:USDT
+        sym  = m['symbol']                          # BTC/USDT:USDT
         tick = okx.fetch_ticker(sym)
-
-        # ➜ 거래대금 값이 없으면 0 으로 간주해 필터에서 제외
-        vol = tick.get('quoteVolume') or tick.get('quoteVolume24h') or 0
+        vol  = tick.get('quoteVolume') or 0
         if vol < VOL_MIN_USDT:
             continue
 
         try:
             close = fetch_close(okx, sym); time.sleep(0.12)
-            stripped = sym.split(':')[0]       # BTC/USDT
+            stripped = sym.split(':')[0]            # BTC/USDT
             base = stripped.replace('/USDT', '')
-            if four_step(close, 'long'):  longs.append(base)
-            if four_step(close, 'short'): shorts.append(base)
+            if four_step(close, 'long'):
+                longs.append(base)
+            if four_step(close, 'short'):
+                shorts.append(base)
         except Exception as e:
             print("[OKX skip]", sym, e)
     return longs, shorts
+
 
 
 def scan_upbit():
