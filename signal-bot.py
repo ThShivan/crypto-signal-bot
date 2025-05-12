@@ -438,7 +438,6 @@ def scan_okx():
     longs, shorts = [], []
     
     try:
-        # 마켓 데이터 로드 전 디버깅 메시지 출력
         print("[OKX Scan] Loading markets...")
         markets = okx.load_markets()
         print(f"[OKX Scan] Loaded {len(markets)} markets")
@@ -453,20 +452,47 @@ def scan_okx():
         
         print(f"[OKX Scan] Filtered down to {len(filtered_symbols)} USDT swap markets")
         
-        # 디버깅을 위해 처음 몇 개의 심볼만 분석 (필요시 주석 해제)
-        # filtered_symbols = filtered_symbols[:5]  # 처음 5개 심볼만 테스트
-        # filtered_symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']  # 특정 심볼만 테스트
+        # 옵션: 테스트를 위해 처음 몇 개 심볼만 분석
+        # filtered_symbols = filtered_symbols[:10]  # 처음 10개만
     
         for sym in filtered_symbols:
             try:
+                base_symbol = markets[sym]['baseId']  # 예: BTC
+                
                 print(f"[OKX Scan] Fetching ticker for {sym}")
                 tick = okx.fetch_ticker(sym)
-                vol_24h_usdt = float(tick.get('quoteVolume', 0) or 0)
-                if tick.get('quoteVolume') is None or tick.get('quoteVolume', 0) < VOL_MIN_USDT:
-                    print(f"[OKX Scan] Skipping {sym} - Low or None volume")
-                    continue
                 
-                base_symbol = markets[sym]['baseId']  # 예: BTC
+                # 볼륨 정보 가져오기 - 다양한 필드 시도
+                vol_24h_usdt = None
+                
+                # 1. 기본 quoteVolume 확인
+                if tick.get('quoteVolume') is not None:
+                    vol_24h_usdt = float(tick.get('quoteVolume', 0))
+                
+                # 2. 대체 필드 확인 - baseVolume(USD로 곱해야 할 수 있음)
+                elif tick.get('baseVolume') is not None:
+                    base_volume = float(tick.get('baseVolume', 0))
+                    # 베이스 볼륨을 USDT 가치로 변환 (대략적인 계산)
+                    if tick.get('last') is not None:
+                        vol_24h_usdt = base_volume * float(tick.get('last', 0))
+                
+                # 3. info 객체 내의 필드 확인
+                elif 'info' in tick and isinstance(tick['info'], dict):
+                    # 볼륨 관련 키 찾기
+                    vol_keys = [k for k in tick['info'].keys() if 'vol' in k.lower() or 'amount' in k.lower()]
+                    for key in vol_keys:
+                        try:
+                            value = tick['info'][key]
+                            if isinstance(value, (int, float)) or (isinstance(value, str) and value.replace('.', '', 1).isdigit()):
+                                vol_24h_usdt = float(value)
+                                break
+                        except (ValueError, TypeError):
+                            continue
+                
+                # 볼륨 정보가 없거나 최소 볼륨 미만인 경우 건너뛰기
+                if vol_24h_usdt is None or vol_24h_usdt < VOL_MIN_USDT:
+                    print(f"[OKX Scan] Skipping {sym} - {'No volume data' if vol_24h_usdt is None else f'Low volume: {vol_24h_usdt:.0f} USDT'}")
+                    continue
                 
                 print(f"[OKX Scan] Analyzing {sym} (Vol: {vol_24h_usdt:.0f} USDT)")
                 mtf_data = fetch_mtf_data(okx, sym)
