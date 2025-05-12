@@ -1,4 +1,3 @@
-# signal_bot.py  ─ Binance 4-Step Signal Bot (robust ver.)
 # ------------------------------------------------------------------
 # requirements.txt
 # pandas
@@ -8,20 +7,19 @@
 # ------------------------------------------------------------------
 import os, sys, time, datetime as dt, requests, pandas as pd, ta
 
-# ▶️ 환경 변수 (GitHub Secrets 로 세팅)
+# ───────── 환경 변수 (GitHub-Secrets 입력) ─────────
 TG_TOKEN = os.getenv("TG_TOKEN")
 TG_CHAT  = os.getenv("TG_CHAT")
 
-# ▶️ 상수
-BASE         = "https://fapi.binance.com"
-INTERVAL     = "4h"
-CANDLES      = 300
-VOL_MIN_USD  = 1_000_000          # 24h 거래대금 최소
-LEN_CHAN     = 120
-MARGIN       = 0.02
+# ───────── 파라미터 ─────────
+BASE          = "https://api.bybit.com/v5/market"
+INTERVAL      = "240"               # Bybit kline 240 = 4h
+CANDLES       = 300                 # 50 일 가량
+VOL_MIN_USD   = 1_000_000           # 24 h turnover ≥ 1 M USD
+LEN_CHAN      = 120
+MARGIN        = 0.02                # 2 %
 
-# ------------------------------------------------------------------
-# 🔹 공용: 안전한 GET (재시도)
+# ────────────────────────────────────────────────
 def safe_get(url, params=None, tries=3, wait=2):
     for i in range(1, tries + 1):
         try:
@@ -33,91 +31,85 @@ def safe_get(url, params=None, tries=3, wait=2):
             time.sleep(wait)
     return None
 
-# 🔹 1) 티커 목록
-def get_usdt_perp_list():
-    j = safe_get(f"{BASE}/fapi/v1/exchangeInfo")
-    if j and "symbols" in j:
-        return [s["symbol"] for s in j["symbols"]
-                if s["quoteAsset"] == "USDT" and s["contractType"] == "PERPETUAL"]
-    # fallback 최소 리스트
-    return ["BTCUSDT", "ETHUSDT", "FETUSDT", "PEPEUSDT"]
+# 1) USDT-Perp 심볼 전체
+def get_bybit_symbols():
+    j = safe_get(f"{BASE}/instruments", params={"category": "linear"})
+    if j and "list" in j.get("result", {}):
+        return [d["symbol"] for d in j["result"]["list"]]
+    print("⚠️  instruments endpoint error — fallback list")
+    return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]            # 폴백 최소
 
-# 🔹 2) 24h 거래대금 필터
-def filter_by_volume(tickers):
-    j = safe_get(f"{BASE}/fapi/v1/ticker/24hr")
+# 2) 24 h 거래대금 필터
+def filter_by_volume(symbols):
+    j = safe_get(f"{BASE}/tickers", params={"category": "linear"})
     if not j:
-        print("⚠️  24hr endpoint error, skip volume filter")
-        return tickers
-    vol = {d["symbol"]: float(d["quoteVolume"]) for d in j}
-    return [tk for tk in tickers if vol.get(tk, 0) > VOL_MIN_USD]
+        print("⚠️  tickers endpoint error, skip volume filter")
+        return symbols
+    vol = {d["symbol"]: float(d["turnover24h"]) for d in j["result"]["list"]}
+    return [s for s in symbols if vol.get(s, 0) > VOL_MIN_USD]
 
-# 🔹 3) OHLCV (클로즈 시리즈)
+# 3) OHLCV → Close Series
 def fetch_close_series(symbol):
-    params = {"symbol": symbol, "interval": INTERVAL, "limit": CANDLES}
-    j = safe_get(f"{BASE}/fapi/v1/klines", params=params)
-    if not j:
-        raise RuntimeError("klines fetch failed")
-    return pd.Series([float(x[4]) for x in j])
+    params = {"category": "linear", "symbol": symbol,
+              "interval": INTERVAL, "limit": CANDLES}
+    j = safe_get(f"{BASE}/kline", params=params)
+    if not j or not j["result"]["list"]:
+        raise RuntimeError("kline fetch failed")
+    closes = [float(c[4]) for c in j["result"]["list"]]
+    return pd.Series(closes)
 
-# 🔹 4) 4-Step 필터
-def four_step(close, direction):
-    # ① 추세 (최근 3봉 HH-HL or LH-LL)
+# 4) 4-Step 필터
+def four_step(close, side):
     trend_up = close.iloc[-1] > close.iloc[-2] > close.iloc[-3]
     trend_dn = close.iloc[-1] < close.iloc[-2] < close.iloc[-3]
 
-    # ② 회귀채널
     basis = ta.trend.ema_indicator(close, LEN_CHAN)
     dev   = (close - basis).abs().rolling(LEN_CHAN).max()
     lower, upper = basis - dev, basis + dev
     chan_long  = close.iloc[-1] <= lower.iloc[-1] * (1 + MARGIN)
     chan_short = close.iloc[-1] >= upper.iloc[-1] * (1 - MARGIN)
 
-    # ③ RSI
     rsi = ta.momentum.rsi(close, 14).iloc[-1]
     r_long, r_short = rsi < 30, rsi > 70
 
-    # ④ SMA20 ±2 %
     sma20 = close.rolling(20).mean().iloc[-1]
     mv_ok = abs(close.iloc[-1] - sma20) / sma20 < MARGIN
 
-    if direction == "long":
+    if side == "long":
         return trend_up and chan_long  and r_long  and mv_ok
-    if direction == "short":
+    if side == "short":
         return trend_dn and chan_short and r_short and mv_ok
     return False
 
-# 🔹 5) 전체 스캔
-def scan_market():
-    tickers = filter_by_volume(get_usdt_perp_list())
-    long_ls, short_ls = [], []
-    for tk in tickers:
+# 5) 시장 스캔
+def scan():
+    symbols = filter_by_volume(get_bybit_symbols())
+    longs, shorts = [], []
+    for s in symbols:
         try:
-            s = fetch_close_series(tk)
-            time.sleep(0.1)  # API 부담↓
-            if four_step(s, "long"):  long_ls.append(tk)
-            if four_step(s, "short"): short_ls.append(tk)
+            closes = fetch_close_series(s); time.sleep(0.15)
+            if four_step(closes, "long"):  longs.append(s)
+            if four_step(closes, "short"): shorts.append(s)
         except Exception as e:
-            print(f"[scan] {tk} skipped – {e}", file=sys.stderr)
-    return long_ls, short_ls
+            print(f"[scan] {s} skipped – {e}", file=sys.stderr)
+    return longs, shorts
 
-# 🔹 6) Telegram
-def send_telegram(text):
+# 6) Telegram
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    safe_get(url, params=None, tries=1)  # ping
-    requests.post(url, json={"chat_id": TG_CHAT,
-                             "text": text,
+    requests.post(url, json={"chat_id": TG_CHAT, "text": msg,
                              "parse_mode": "Markdown"})
 
-# 🔹 메인
+# ─────────── main ───────────
 def main():
-    long_, short_ = scan_market()
-    today = dt.datetime.utcnow() + dt.timedelta(hours=9)
-    header = f"*📊 Binance 4-Step Signals – {today:%Y-%m-%d %H:%M} KST*"
-    fmt = lambda lst: ", ".join(lst) if lst else "―"
-    msg = f"{header}\n\n*Long*\n{fmt(long_)}\n\n*Short*\n{fmt(short_)}"
+    long_, short_ = scan()
+    now = dt.datetime.utcnow() + dt.timedelta(hours=9)
+    head = f"*📊 Bybit USDT-Perp 4-Step Signals – {now:%Y-%m-%d %H:%M} KST*"
+    fmt  = lambda lst: ", ".join(lst) if lst else "―"
+    msg  = f"{head}\n\n*Long*\n{fmt(long_)}\n\n*Short*\n{fmt(short_)}"
     send_telegram(msg)
 
 if __name__ == "__main__":
     if not TG_TOKEN or not TG_CHAT:
-        sys.exit("❌ TG_TOKEN / TG_CHAT missing")
+        sys.exit("❌  TG_TOKEN / TG_CHAT env missing")
     main()
