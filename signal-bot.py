@@ -507,7 +507,50 @@ def scan_okx():
                 if long_analysis['valid']:
                     rr = long_analysis['risk_reward']['rr_mid'] if long_analysis['risk_reward'] else 0
                     rsi_val = long_analysis['details']['h1_rsi']['value'] if long_analysis['details'].get('h1_rsi') else -1
-                    longs.append({'symbol': base_symbol, 'strength': long_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+                    
+                    # 가격 정보 추출
+                    current_price = mtf_data['1h']['close'].iloc[-1]
+                    stop_loss = long_analysis['risk_reward']['stop_loss'] if long_analysis['risk_reward'] else 0
+                    
+                    # 목표가 계산
+                    take_profit1 = long_analysis['risk_reward']['take_profit'] if long_analysis['risk_reward'] else 0
+                    
+                    # 채널 정보 가져오기
+                    h4_channel = long_analysis['details']['h4_channel']
+                    mid_price = h4_channel['mid'] if h4_channel else current_price * 1.05
+                    upper_price = h4_channel['upper'] if h4_channel else current_price * 1.10
+                    
+                    # 목표가 설정
+                    take_profit1 = mid_price  # 1차 목표: 채널 중앙
+                    take_profit2 = (mid_price + upper_price) / 2  # 2차 목표: 중앙-상단 사이
+                    take_profit3 = upper_price  # 3차 목표: 채널 상단
+                    
+                    # 진입가 범위 설정 (현재가 기준 ±0.5%)
+                    entry_low = current_price * 0.995
+                    entry_high = current_price * 1.005
+                    
+                    # PNL 계산
+                    pnl1 = ((take_profit1 - current_price) / current_price) * 100
+                    pnl2 = ((take_profit2 - current_price) / current_price) * 100
+                    pnl3 = ((take_profit3 - current_price) / current_price) * 100
+                    
+                    longs.append({
+                        'symbol': base_symbol, 
+                        'strength': long_analysis['strength'], 
+                        'rr': rr, 
+                        'rsi': rsi_val,
+                        'current_price': current_price,
+                        'entry_low': entry_low,
+                        'entry_high': entry_high,
+                        'stop_loss': stop_loss,
+                        'take_profit1': take_profit1,
+                        'take_profit2': take_profit2,
+                        'take_profit3': take_profit3,
+                        'pnl1': pnl1,
+                        'pnl2': pnl2,
+                        'pnl3': pnl3
+                    })
+                    
                     log_signal('okx', base_symbol, 'long', {'strength': long_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
                     print(f"[OKX Scan] ✅ Valid LONG signal for {sym}: Strength={long_analysis['strength']:.1f}, RR={rr:.1f}")
                 
@@ -517,9 +560,50 @@ def scan_okx():
                 if short_analysis['valid']:
                     rr = short_analysis['risk_reward']['rr_mid'] if short_analysis['risk_reward'] else 0
                     rsi_val = short_analysis['details']['h1_rsi']['value'] if short_analysis['details'].get('h1_rsi') else -1
-                    shorts.append({'symbol': base_symbol, 'strength': short_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
+                    
+                    # 가격 정보 추출
+                    current_price = mtf_data['1h']['close'].iloc[-1]
+                    stop_loss = short_analysis['risk_reward']['stop_loss'] if short_analysis['risk_reward'] else 0
+                    
+                    # 채널 정보 가져오기
+                    h4_channel = short_analysis['details']['h4_channel']
+                    mid_price = h4_channel['mid'] if h4_channel else current_price * 0.95
+                    lower_price = h4_channel['lower'] if h4_channel else current_price * 0.90
+                    
+                    # 목표가 설정
+                    take_profit1 = mid_price  # 1차 목표: 채널 중앙
+                    take_profit2 = (mid_price + lower_price) / 2  # 2차 목표: 중앙-하단 사이
+                    take_profit3 = lower_price  # 3차 목표: 채널 하단
+                    
+                    # 진입가 범위 설정 (현재가 기준 ±0.5%)
+                    entry_low = current_price * 0.995
+                    entry_high = current_price * 1.005
+                    
+                    # 숏 포지션 PNL 계산 (하락 시 양수)
+                    pnl1 = ((current_price - take_profit1) / current_price) * 100
+                    pnl2 = ((current_price - take_profit2) / current_price) * 100
+                    pnl3 = ((current_price - take_profit3) / current_price) * 100
+                    
+                    shorts.append({
+                        'symbol': base_symbol, 
+                        'strength': short_analysis['strength'], 
+                        'rr': rr, 
+                        'rsi': rsi_val,
+                        'current_price': current_price,
+                        'entry_low': entry_low,
+                        'entry_high': entry_high,
+                        'stop_loss': stop_loss,
+                        'take_profit1': take_profit1,
+                        'take_profit2': take_profit2,
+                        'take_profit3': take_profit3,
+                        'pnl1': pnl1,
+                        'pnl2': pnl2,
+                        'pnl3': pnl3
+                    })
+                    
                     log_signal('okx', base_symbol, 'short', {'strength': short_analysis['strength'], 'rr': rr, 'rsi': rsi_val})
                     print(f"[OKX Scan] ✅ Valid SHORT signal for {sym}: Strength={short_analysis['strength']:.1f}, RR={rr:.1f}")
+    
     
             except ccxt.RateLimitExceeded as e:
                 print(f"[OKX RateLimit] {sym}: {e}. Sleeping for 60s...")
@@ -533,10 +617,10 @@ def scan_okx():
         print(f"[OKX Scan Critical Error]: {type(e).__name__} - {e}")
         longs, shorts = [], []
     
+    # 객체 전체를 반환하도록 수정 - 상세 정보 포함
     longs.sort(key=lambda x: x['strength'], reverse=True)
     shorts.sort(key=lambda x: x['strength'], reverse=True)
-    return [f"{item['symbol']} ({item['strength']:.0f}|{item['rr']:.1f})" for item in longs], \
-           [f"{item['symbol']} ({item['strength']:.0f}|{item['rr']:.1f})" for item in shorts]
+    return longs, shorts  # 객체 목록 반환
 
 # ─────────── 텔레그램 ───────────
 def send_telegram(msg):
@@ -565,28 +649,46 @@ def main():
     print(f"===== Signal Scan Started at {dt.datetime.now(dt.timezone(dt.timedelta(hours=9))):%Y-%m-%d %H:%M:%S KST} =====")
     
     try:
-        long_results, short_results = scan_okx()
+        longs, shorts = scan_okx()  # 이제 더 자세한 정보가 포함된 객체 목록을 반환
         
-        now_korea = dt.datetime.now(dt.timezone(dt.timedelta(hours=9))) # 한국 시간
+        now_korea = dt.datetime.now(dt.timezone(dt.timedelta(hours=9)))  # 한국 시간
         
-        fmt = lambda x_list: ", ".join(x_list) if x_list else "―"
-        msg_body = (f"📊 *4-Step Signals* — `{now_korea:%Y-%m-%d %H:%M} KST`\n\n"
-                    f"🎯 *Long (OKX USDT-Perp)*\n{fmt(long_results)}\n\n"
-                    f"📉 *Short (OKX USDT-Perp)*\n{fmt(short_results)}")
+        # 텔레그램 메시지 생성
+        msg_body = f"📊 *4-Step Signals* — `{now_korea:%Y-%m-%d %H:%M} KST`\n\n"
+        
+        # 롱 포지션 메시지 생성
+        if longs:
+            msg_body += "🎯 *Long (OKX USDT-Perp)*\n"
+            for i, item in enumerate(longs, 1):
+                msg_body += f"{i}. [{item['symbol']}] (LONG)\n"
+                msg_body += f"(1) 진입가(Entry): {item['entry_low']:.2f} - {item['entry_high']:.2f}\n"
+                msg_body += f"(2) 손절가(Stop Loss): {item['stop_loss']:.2f}\n"
+                msg_body += f"(3) 1차 목표가(TP1): {item['take_profit1']:.2f} (채널 중앙) ({item['pnl1']:.1f}%)\n"
+                msg_body += f"(4) 2차 목표가(TP2): {item['take_profit2']:.2f} (피보 1.382) ({item['pnl2']:.1f}%)\n"
+                msg_body += f"(5) 3차 목표가(TP3): {item['take_profit3']:.2f} (채널 상단) ({item['pnl3']:.1f}%)\n\n"
+        else:
+            msg_body += "🎯 *Long (OKX USDT-Perp)*\n―\n\n"
+            
+        # 숏 포지션 메시지 생성
+        if shorts:
+            msg_body += "📉 *Short (OKX USDT-Perp)*\n"
+            for i, item in enumerate(shorts, 1):
+                msg_body += f"{i}. [{item['symbol']}] (SHORT)\n"
+                msg_body += f"(1) 진입가(Entry): {item['entry_low']:.2f} - {item['entry_high']:.2f}\n"
+                msg_body += f"(2) 손절가(Stop Loss): {item['stop_loss']:.2f}\n"
+                msg_body += f"(3) 1차 목표가(TP1): {item['take_profit1']:.2f} (채널 중앙) ({item['pnl1']:.1f}%)\n"
+                msg_body += f"(4) 2차 목표가(TP2): {item['take_profit2']:.2f} (피보 1.382) ({item['pnl2']:.1f}%)\n"
+                msg_body += f"(5) 3차 목표가(TP3): {item['take_profit3']:.2f} (채널 하단) ({item['pnl3']:.1f}%)\n\n"
+        else:
+            msg_body += "📉 *Short (OKX USDT-Perp)*\n―\n\n"
         
         send_telegram(msg_body)
         
         elapsed_time = time.time() - start_time
-        print(f"OKX Long: {len(long_results)}, OKX Short: {len(short_results)}")
+        print(f"OKX Long: {len(longs)}, OKX Short: {len(shorts)}")
         print(f"===== Signal Scan Completed in {elapsed_time:.2f} seconds =====")
 
     except Exception as e:
         error_msg = f"❌ Critical Error in signal bot main process: {type(e).__name__} - {str(e)}"
         print(error_msg)
         send_telegram(f"*CRITICAL ERROR*: {error_msg}")
-
-if __name__ == "__main__":
-    if not TG_TOKEN or not TG_CHAT:
-        print("⚠️ TG_TOKEN / TG_CHAT environment variables missing. Telegram notifications will be disabled.")
-    
-    main()
