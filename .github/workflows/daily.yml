@@ -1,7 +1,7 @@
 name: CCXT 4-Step Daily
 on:
   schedule:
-    - cron: '0 */4 * * *'      # 매 4시간마다	
+    - cron: '0 */1 * * *'      # 매 4시간마다	
   workflow_dispatch:
 
 jobs:
