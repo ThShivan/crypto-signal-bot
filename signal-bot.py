@@ -461,9 +461,9 @@ def scan_okx():
             try:
                 print(f"[OKX Scan] Fetching ticker for {sym}")
                 tick = okx.fetch_ticker(sym)
-                vol_24h_usdt = tick.get('quoteVolume', 0)
-                if vol_24h_usdt < VOL_MIN_USDT:
-                    print(f"[OKX Scan] Skipping {sym} - Low volume: {vol_24h_usdt:.0f} USDT")
+                vol_24h_usdt = float(tick.get('quoteVolume', 0) or 0)
+                if tick.get('quoteVolume') is None or tick.get('quoteVolume', 0) < VOL_MIN_USDT:
+                    print(f"[OKX Scan] Skipping {sym} - Low or None volume")
                     continue
                 
                 base_symbol = markets[sym]['baseId']  # 예: BTC
