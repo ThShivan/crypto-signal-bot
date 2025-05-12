@@ -34,7 +34,7 @@ LOGS_DIR = "logs"  # 로그 저장 디렉토리
 INTERVAL_DAILY = '1d'        # 일봉 (상위 추세)
 INTERVAL_4H = '4h'           # 4시간봉 (중기 추세)
 INTERVAL_1H = '1h'           # 1시간봉 (단기 타이밍)
-INTERVAL_UPBIT_DAILY = 'days' # 업비트 일봉 (수정: 'day' -> 'days')
+INTERVAL_UPBIT_DAILY = '1d'  # 업비트 일봉
 INTERVAL_UPBIT_4H = '240m'   # 업비트 4시간봉
 INTERVAL_UPBIT_1H = '60m'    # 업비트 1시간봉
 
@@ -559,7 +559,7 @@ def main():
 
     try:
         okx_long_results, okx_short_results = scan_okx()
-        # upbit_spot_results = scan_upbit()
+        upbit_spot_results = scan_upbit()
         
         now_korea = dt.datetime.now(kst) 
         
